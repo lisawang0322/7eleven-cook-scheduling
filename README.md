@@ -1,4 +1,4 @@
-# 7-Eleven Hot Food Cook Sequencing System — Sprint 1 Complete
+# Hot Food Cook Sequencing System
 
 An AI system that helps store associates decide which hot food item to cook first during overlapping daypart windows. Built across Weeks 1–9 using a three-tier model stack (rule-based → ML → LLM benchmark) with a reproducible evaluation harness.
 

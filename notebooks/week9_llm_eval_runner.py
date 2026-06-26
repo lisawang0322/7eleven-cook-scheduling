@@ -3,13 +3,13 @@
 Supports three eval sets:
   v0.1  50-example legacy set (5-item universe, data/llm_eval_set_v0.1.json)
   v0.2  53-example 28-item set (data/llm_eval_set_v0.2.json)
-  v0.3  32-example JTBD plain-language set (data/llm_eval_set_v0.3.json)
+  v0.3  50-example JTBD plain-language set (data/llm_eval_set_v0.3.json)
 
 Metrics (v0.3 JTBD-aligned, also computed for v0.1/v0.2 where ground truth allows):
   cook_now_accuracy       — did the model pick the right first item?
   cook_now_set_recall     — fraction of urgent items that landed in the top-k
   must_precede_violations — A-before-B safety violations (goal = 0)
-  refusal_accuracy        — OOS / adversarial examples (trust dimension)
+  refusal_accuracy        — refusal-routed examples (trust dimension)
   kendall_tau_mean        — full-order quality (secondary)
 
 Usage:
@@ -92,9 +92,19 @@ def load_system_prompt() -> str:
 
 def load_eval_set() -> tuple[dict, list[dict]]:
     if not os.path.exists(EVAL_SET_PATH):
+        build_script = os.path.join(
+            PROJECT_ROOT,
+            "scripts",
+            f"build_eval_set_{EVAL_SET_VERSION.replace('.', '_')}.py",
+        )
+        run_hint = (
+            f"Run: python {os.path.relpath(build_script, PROJECT_ROOT)}"
+            if os.path.exists(build_script)
+            else "No builder script found for this eval version; restore the JSON file from git."
+        )
         raise FileNotFoundError(
             f"Eval set not found: {EVAL_SET_PATH}. "
-            f"Run: python scripts/build_eval_set_{EVAL_SET_VERSION.replace('.', '_')}.py"
+            f"{run_hint}"
         )
     with open(EVAL_SET_PATH) as f:
         data = json.load(f)
@@ -377,11 +387,20 @@ def compute_tau(pred: list[str], truth: list[str]) -> float | None:
     return round(float(tau), 4)
 
 
+def is_refusal_example(ex: dict, features: dict) -> bool:
+    """True when this example should be evaluated via refusal_fn instead of ranking."""
+    # Rankable examples have recognized item-level feature blocks.
+    if present_items(features):
+        return False
+    # v0.1/v0.2 refusal-only OOS/adversarial examples have no rankable items.
+    return True
+
+
 def evaluate_comparator(
     name: str,
     examples: list[dict],
     rank_fn,
-    refusal_fn=None,  # fn(input_text: str) -> (bool, str) | None; None = skip OOS/adv
+    refusal_fn=None,  # fn(input_text: str) -> (bool, str) | None; None = skip refusal examples
 ) -> dict[str, Any]:
     ranking_correct = 0
     ranking_evaluated = 0
@@ -405,7 +424,7 @@ def evaluate_comparator(
         cook_now      = ex.get("cook_now") or truth_first
         cook_now_set  = ex.get("cook_now_set") or ([cook_now] if cook_now else [])
         must_precede  = ex.get("must_precede") or []
-        is_refusal_ex = any(t in ("OOS", "adversarial") for t in ex.get("eval_tags", []))
+        is_refusal_ex = is_refusal_example(ex, features)
 
         if is_refusal_ex:
             if refusal_fn is None:
@@ -511,6 +530,7 @@ def slice_breakdown(
     examples: list[dict],
     comparator_results: dict[str, dict],
     slice_key: str,
+    metric_key: str = "correct",
 ) -> dict[str, dict[str, float]]:
     """Top-1 accuracy by slice value for each comparator."""
     slices: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
@@ -531,8 +551,8 @@ def slice_breakdown(
         val = str(val)
         for name in comparator_results:
             pe = result_lookup.get(eid, {}).get(name)
-            if pe and pe["correct"] is not None:
-                slices[val][name].append(int(pe["correct"]))
+            if pe and pe.get(metric_key) is not None:
+                slices[val][name].append(int(pe[metric_key]))
 
     return {
         val: {
@@ -546,13 +566,15 @@ def slice_breakdown(
 def source_breakdown(
     examples: list[dict],
     comparator_results: dict[str, dict],
+    metric_key: str = "correct",
 ) -> dict[str, dict[str, float]]:
-    return slice_breakdown(examples, comparator_results, "source")
+    return slice_breakdown(examples, comparator_results, "source", metric_key=metric_key)
 
 
 def tag_breakdown(
     examples: list[dict],
     comparator_results: dict[str, dict],
+    metric_key: str = "correct",
 ) -> dict[str, dict[str, float]]:
     """Top-1 accuracy per eval_tag (examples may have multiple tags)."""
     slices: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
@@ -570,8 +592,8 @@ def tag_breakdown(
         for tag in ex["eval_tags"]:
             for name in comparator_results:
                 pe = result_lookup.get(eid, {}).get(name)
-                if pe and pe["correct"] is not None:
-                    slices[tag][name].append(int(pe["correct"]))
+                if pe and pe.get(metric_key) is not None:
+                    slices[tag][name].append(int(pe[metric_key]))
 
     return {
         tag: {
@@ -585,9 +607,10 @@ def tag_breakdown(
 def category_breakdown(
     examples: list[dict],
     comparator_results: dict[str, dict],
+    metric_key: str = "correct",
 ) -> dict[str, dict[str, float]]:
     """Top-1 accuracy by CSV category (modal / edge / OOS / adversarial)."""
-    return slice_breakdown(examples, comparator_results, "csv_tag")
+    return slice_breakdown(examples, comparator_results, "csv_tag", metric_key=metric_key)
 
 
 # ===========================================================================
@@ -635,7 +658,7 @@ def main() -> None:
         llm_key = f"llm_{PROMPT_VERSION}_zero_shot"
         rank_fns[llm_key] = lambda ex: llm.rank(ex)
         refusal_fns[llm_key] = llm.check_refusal
-        n_ranking  = sum(1 for ex in examples if not any(t in ("OOS", "adversarial") for t in ex.get("eval_tags", [])))
+        n_ranking  = sum(1 for ex in examples if not is_refusal_example(ex, _extract_features(ex)))
         n_refusal  = len(examples) - n_ranking
         print(f"  LLM ready. {n_ranking} ranking + {n_refusal} refusal API calls.")
 
@@ -649,11 +672,12 @@ def main() -> None:
 
     # --- Breakdowns ---
     print("\n[4/5] Computing breakdowns...")
-    by_source    = source_breakdown(examples, results)
-    by_tag       = tag_breakdown(examples, results)
-    by_category  = category_breakdown(examples, results)
-    by_store     = slice_breakdown(examples, results, "store_type")
-    by_hour_band = slice_breakdown(examples, results, "hour_band")
+    breakdown_metric = "cook_now_correct" if EVAL_SET_VERSION == "v0.3" else "correct"
+    by_source    = source_breakdown(examples, results, metric_key=breakdown_metric)
+    by_tag       = tag_breakdown(examples, results, metric_key=breakdown_metric)
+    by_category  = category_breakdown(examples, results, metric_key=breakdown_metric)
+    by_store     = slice_breakdown(examples, results, "store_type", metric_key=breakdown_metric)
+    by_hour_band = slice_breakdown(examples, results, "hour_band", metric_key=breakdown_metric)
 
     # --- Print summary ---
     print("\n" + "=" * 72)
@@ -788,7 +812,7 @@ def main() -> None:
                 "cook_now_accuracy: did model pick the right first item? "
                 "cook_now_set_recall: fraction of urgent items in top-k. "
                 "must_precede_violations: safety constraint violations (goal=0). "
-                "refusal_accuracy: OOS/adversarial correctness. "
+                "refusal_accuracy: correctness on refusal-routed examples. "
                 "kendall_tau: full-order quality (secondary)."
             ),
             "canonical_holdout_reference": _load_holdout_ref(),

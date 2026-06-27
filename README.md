@@ -2,7 +2,7 @@
 
 An AI system that helps store associates decide which hot food item to cook first during overlapping daypart windows. Built across Weeks 1–9 using a three-tier model stack (rule-based → ML → LLM benchmark) with a reproducible evaluation harness.
 
-> **Sprint 1 Status (Week 9) + Jun 2026 updates:** All deliverables complete. **Selection metric (Tier 1 holdout):** v1 58.6% • v2.2 **68.9%** (730-scenario temporal holdout — authoritative). **JTBD v0.3 DIAGNOSTIC eval** (110 examples, 95 ranking + 15 refusal, Jun 26 2026): LLM **95.8%** JTBD / **78.9%** formula (native) → **90.4%** formula (fair `--input-mode=features`) ≈ v1 **92.6%** • v2.2 **91.6%** (v1≈v2.2 n.s., p=1.0). *v0.3 is diagnostic only; see [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md).* Fair-and-Robust eval harness: bootstrap CIs, McNemar significance, multi-seed floor, `--input-mode`, scale stratification, selection scorecard.
+> **Sprint 1 Status (Week 9) + Jun 2026 updates:** All deliverables complete. **Selection metric (Tier 1 holdout):** v1 58.6% • v2.2 **68.9%** • v2.3 66.0% • v3 66.2% (730-scenario temporal holdout — authoritative). **Holdout head-to-head eval** (197 examples: 150 modal from ML holdout + 47 guardrails, Jun 27 2026): on modal slice formula top-1 — v2.2 **67.3%** • v2.3 64.7% • v1 56.0% • LLM v0.3 **26.7%** (hypothesis confirmed: idealized human judgment underperforms ML). **JTBD v0.3 DIAGNOSTIC eval** (110 examples, 2–5 items, Jun 26 2026): LLM **95.8%** JTBD / **78.9%** formula (native) → **90.4%** formula (fair `--input-mode=features`) ≈ v1 **92.6%** • v2.2 **91.6%** — *diagnostic only; confounded by small-item prose set.* See [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md). Fair-and-Robust harness: bootstrap CIs, McNemar, multi-seed floor, `--eval-set=holdout`, hardened LLM parsing.
 
 ---
 
@@ -79,19 +79,20 @@ The system generates this schedule by:
 
 ### Three-Tier Model Stack
 
-| Tier | Model | Role | 28-item holdout | 5-item shared eval |
-|---|---|---|---|---|
-| Floor | `AssociateBaseline` | Simulates realistic (flawed) associate behavior | 8.9% | 52.4% |
-| ML v1 | Rule-based heuristic | Urgency × demand_density × waste_penalty | 58.6% | 78.6% |
-| ML v2.2 | Pairwise GBM (temporal split) | Learned from labeled historical data | **68.9%** | **81.0%** |
-| ML v3 | LightGBM LambdaRank (listwise) | Optimises NDCG directly; group = scenario | **66.2%** top-1 / NDCG@1 0.723 | — |
-| Ceiling | LLM v0.2 (claude-sonnet-4-6) | Idealized associate intuition, no formulas | n/a | 64.0% |
+| Tier | Model | Role | 28-item holdout | Holdout eval (modal 150) | 5-item shared eval |
+|---|---|---|---|---|---|
+| Floor | `AssociateBaseline` | Simulates realistic (flawed) associate behavior | 8.9% | 14.0% | 52.4% |
+| ML v1 | Rule-based heuristic | Urgency × demand_density × waste_penalty | 58.6% | 56.0% | 78.6% |
+| ML v2.2 | Pairwise GBM (temporal split) | Learned from labeled historical data | **68.9%** | **67.3%** | **81.0%** |
+| ML v2.3 | Symmetric pairwise + proba agg | v2.2 variant: balanced pairs, no sample weights | 66.0% | 64.7% | — |
+| ML v3 | LightGBM LambdaRank (listwise) | Optimises NDCG directly; group = scenario | **66.2%** top-1 / NDCG@1 0.723 | — | — |
+| Ceiling | LLM v0.3 (claude-sonnet-4-6) | Idealized associate judgment proxy, plain-language | — | **26.7%** | 64.0% (v0.2) |
 
-*28-item holdout = temporal split ≥ 2025-05-01, 730 scenarios. 5-item shared eval = Sprint 1 50-example set (pizza/wings/baked goods). v2.2 improved on both after retraining. v3 holdout numbers appear in `output/v3_lambdarank_report.json` after running the training pipeline; app/API still serve v2.2.*
+*730-scenario holdout = temporal split ≥ 2025-05-01 (authoritative ML selection metric). **Holdout eval modal 150** = stratified sample from that holdout + 47 v0.3 guardrails (197 total); compare formula top-1 on modal slice only. 5-item shared eval = Sprint 1 50-example set. App/API still serve v2.2.*
 
 **Why predictive ML as primary model:** This is a classification task with deterministic outputs — correct rank order given a scenario. Predictive ML is narrow, well-scoped, and measured by accuracy metrics. It fits this constraint-satisfaction problem without hallucination risk.
 
-**Why LLM as benchmark (not primary model):** The LLM serves as the *idealized-associate ceiling* — testing whether an LLM reasoning like an experienced associate converges on the same rankings as domain-expert labels. Where LLM and ML agree → label is intuitive. Where they diverge → investigate the label.
+**Why LLM as benchmark (not primary model):** The LLM serves as an *idealized human-judgment proxy* — testing whether reasoning like an experienced associate converges on formula-optimal rankings at scale. On the **150-example modal holdout** (19–28 items, plain-language), LLM v0.3 reaches **26.7%** formula top-1 vs v2.2 **67.3%** — confirming that even a strong LLM underperforms learned ML on the real selection task. The smaller v0.3 diagnostic set (2–5 items) is useful for guardrail/refusal testing but confounded for selection (prose input, easy item count).
 
 ### Agency Level: Augmentation
 
@@ -650,6 +651,17 @@ v2.2 (pairwise + temporal + weights):      68.9%  (honest temporal test, 730 hol
 
 ---
 
+#### Iteration 8 (v2.3): Symmetric Pairwise + Probability Aggregation
+
+| Dimension | Detail |
+|-----------|--------|
+| **Changes vs v2.2** | Symmetric pair augmentation (removes item-position bias); probability-based rank aggregation (avoids intransitive win-count cycles); no sample weights (edge/near-tie pairs weighted equally) |
+| **Split** | Same temporal split as v2.2 (cutoff 2025-05-01) |
+| **Result** | Test top-1 **66.0%** (730 holdout, −2.9pp vs v2.2); holdout eval modal slice **64.7%** |
+| **Status** | Experimental — v2.2 remains selection winner |
+
+---
+
 #### Summary Table
 
 | Version | Approach | Pairwise CV | Honest Test | vs Associate |
@@ -658,6 +670,7 @@ v2.2 (pairwise + temporal + weights):      68.9%  (honest temporal test, 730 hol
 | v1 | Rule-based (urgency × density × penalty) | — | 58.6% | +49.7 |
 | v2.1 | Pairwise GBM + historical (no temporal split) | 79.5% | 77.1% | +68.2 |
 | **v2.2** | **Pairwise GBM + temporal + soft labels** | **79.6%** | **68.9%** | **+60.0** |
+| v2.3 | Symmetric pairwise + proba agg (no weights) | 79.5% | 66.0% | — |
 | v3 | LightGBM LambdaRank (listwise, NDCG) | — | **66.2%** top-1 / NDCG@1 0.723 | — |
 
 **Note:** v2.1's 77.1% is slightly inflated (historical features used test-period data). v2.2's 68.9% is the honest metric with no data leakage. v3 achieves 66.2% top-1 on the same 730-scenario holdout (−2.7pp vs v2.2) but optimises NDCG directly (NDCG@1 0.723 / @3 0.753 / @5 0.797) with 11× fewer training rows and no win-counting. Full metrics in `output/v3_lambdarank_report.json`.
@@ -714,22 +727,37 @@ python scripts/compare_llm_versions.py v0.1 v0.2
 **Open question — divergence cases:** The LLM consistently ranks high-demand baked_goods above pizza/wings even when baked_goods has a 23hr window. This may reflect genuine associate intuition that diverges from the formula. Requires field validation before treating as a prompt failure.
 
 **Eval harness features (Fair-and-Robust update Jun 2026):**
-- `--eval-set=v0.1|v0.2|v0.3` selects eval set; `--prompt-version=vX.Y` selects prompt
+- `--eval-set=v0.1|v0.2|v0.3|holdout` selects eval set; `--prompt-version=vX.Y` selects prompt
+- **`--eval-set=holdout`** — 197 examples (150 modal from ML temporal holdout + 47 v0.3 guardrails); use **modal slice formula top-1** for head-to-head ML vs LLM selection comparison
 - `--assoc-seeds=N` (default 20): multi-seed associate floor → reports mean ± std (not single draw)
 - `--llm-samples=k` (default 1): repeated LLM runs → mean ± std, parse-failure rate (cost-gated)
 - `--input-mode=native|features|prose`: controls LLM input fairness; `features` mode feeds numeric table (removes prose advantage)
+- **LLM parse hardening (Jun 27 2026):** `max_tokens=1024`, robust JSON extraction/repair, deterministic retries, v1 fallback — 0 parse failures on latest holdout run
 - **Bootstrap 95% CIs** (`bootstrap_ci`, n=2,000, seed=42) on cook-now, formula top-1, set-recall, MPV-rate
 - **McNemar paired significance matrix** between all comparators (same examples → paired test appropriate)
 - **Scale stratification** (`item_count_band`: small 2-5 / medium 6-12 / large 13-28) — compare within band
 - **Holdout-clean slice** (`holdout_clean` flag, cutoff 2025-05-01) — v2.2 selection metrics only on clean examples
 - **Selection scorecard** (`selection_scorecard` block): primary metric + CI, guardrail pass/fail, recommendation
 - v0.3 routing, JTBD metrics, dual-label breakdown: unchanged
-- `--no-llm` flag for dry-run against ML baselines only
+- `--no-llm` flag for dry-run against ML baselines only; preserves existing LLM preds when re-running ML only
+
+**Holdout head-to-head eval (Jun 27 2026, `--eval-set=holdout --prompt-version=v0.3`):**
+
+| Comparator | Modal formula top-1 (n=150) | OOS refusal | MPV | Parse failures |
+|---|---|---|---|---|
+| associate_floor | 14.0% | — | 15 | 0 |
+| v1_rules | 56.0% | — | 23 | 0 |
+| v2_2_ml | **67.3%** | — | 11 | 0 |
+| v2_3_ml | 64.7% | — | 12 | 0 |
+| llm_v0.3_zero_shot | **26.7%** | 93.3% (14/15) | 1 | **0** |
+
+**Interpretation:** LLM underperforms v2.2 by **−40.6pp** on the modal holdout slice — supporting the hypothesis that idealized human judgment (LLM proxy) does not beat learned ML at production scale (19–28 items). LLM passes MPV/refusal guardrails but fails latency (~11s vs 3s budget). Reports: `output/llm_eval_v0.3_holdout_report.json`.
 
 **Deliverables:**
-- `prompts/v0.1_system_prompt.md`, `prompts/v0.2_system_prompt.md`
+- `prompts/v0.1_system_prompt.md`, `prompts/v0.2_system_prompt.md`, `prompts/v0.3_system_prompt.md`
 - `data/llm_eval_set_v0.1.json` — 50 examples (modal 30 / edge 12 / OOS 5 / adv 3)
-- `output/llm_eval_v0.1_report.json`, `output/llm_eval_v0.2_report.json`
+- `data/llm_eval_set_holdout.json` — 197 examples (150 modal holdout + 47 guardrails); built by `scripts/build_eval_set_holdout.py`
+- `output/llm_eval_v0.1_report.json`, `output/llm_eval_v0.2_report.json`, `output/llm_eval_v0.3_holdout_report.json`
 - `output/llm_eval_version_comparison.json`
 - `SPRINT1_SUMMARY.md`
 
@@ -855,9 +883,9 @@ python scripts/compare_llm_versions.py v0.1 v0.2
 ```
 
 **Three-tier evaluation** (see [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md) for full protocol):
-- **Tier 1 — Selection (authoritative):** ML holdout (730 scenarios, temporal split ≥ 2025-05-01). v1 58.6%, v2.2 **68.9%** — current selection winner (+10.3pp, pending bootstrap CI certification).
+- **Tier 1 — Selection (authoritative):** ML holdout (730 scenarios, temporal split ≥ 2025-05-01). v1 58.6%, v2.2 **68.9%** — current selection winner (+10.3pp). **Head-to-head holdout eval** (150 modal + guardrails): v2.2 **67.3%** vs LLM v0.3 **26.7%** on modal formula top-1 (Jun 27 2026).
 - **Tier 2 — Guardrails:** `must_precede_violation_rate` < 5%, refusal accuracy ≥ 90% (on ≥ 20 examples), latency budget, parse failure = 0%.
-- **Tier 3 — Diagnostic only (never decisive):** v0.1/v0.2 formula-label evals + **JTBD v0.3** (110 examples, 95 ranking + 15 refusal, 2–5 items, plain-language). v0.3 headline (Jun 26 2026): LLM **95.8%** JTBD but only **78.9%** formula (native/prose); **90.4%** formula with fair `--input-mode=features` ≈ v1 **92.6%** / v2.2 **91.6%** (McNemar p=1.0). Prose+JTBD-label confound quantified — fair comparison shows no LLM edge on formula. Use for understanding model behaviour, not selection.
+- **Tier 3 — Diagnostic only (never decisive):** v0.1/v0.2 formula-label evals + **JTBD v0.3** (110 examples, 2–5 items, plain-language). v0.3 headline (Jun 26 2026): LLM **95.8%** JTBD but only **78.9%** formula (native/prose); **90.4%** formula with fair `--input-mode=features` ≈ v1 **92.6%** / v2.2 **91.6%** — confounded by small-item set; do not use for selection.
 
 ### Data Flow
 
@@ -879,7 +907,8 @@ python scripts/compare_llm_versions.py v0.1 v0.2
 
 6. LLM Benchmark (Week 8–9)  ✅
    └─> v0.1/v0.2: 50-ex shared eval; v0.1 50% → v0.2 64% top-1
-   └─> v0.3 JTBD eval (Jun 2026): 50 plain-language scenarios, cook-now metrics
+   └─> v0.3 JTBD eval (Jun 2026): 110 plain-language scenarios, cook-now metrics (diagnostic)
+   └─> Holdout head-to-head (Jun 27 2026): LLM 26.7% vs v2.2 67.3% on 150-ex modal slice
 
 7. Demo (Streamlit, Week 8)  ✅
    └─> Associate vs v1 vs v2.2 side-by-side; 3 pages
@@ -1089,6 +1118,10 @@ docker-compose down
 ### Run the Eval Harness
 
 ```bash
+# Holdout head-to-head (SELECTION — 150 modal + 47 guardrails)
+python3.11 notebooks/week9_llm_eval_runner.py --eval-set=holdout --prompt-version=v0.3 --no-llm   # ML only (~1 min)
+python3.11 notebooks/week9_llm_eval_runner.py --eval-set=holdout --prompt-version=v0.3             # full LLM + ML (~30 min)
+
 # v0.1/v0.2 sets — formula-label accuracy (legacy metric, backward-compat)
 python3.11 notebooks/week9_llm_eval_runner.py --no-llm                        # ML baselines, v0.1 set
 python3.11 notebooks/week9_llm_eval_runner.py --eval-set=v0.2 --no-llm        # ML baselines, v0.2 set
@@ -1125,6 +1158,7 @@ python3.11 scripts/compare_reports.py output/llm_eval_v0.3_v0_3_report.json \
 ### Rebuild Eval Sets
 
 ```bash
+python scripts/build_eval_set_holdout.py  # data/llm_eval_set_holdout.json + .csv (150 modal + 47 guardrails)
 python scripts/build_eval_set_v0_1.py   # data/llm_eval_set_v0.1.json + .csv
 python scripts/build_eval_set_v0_3.py   # data/llm_eval_set_v0.3.json + .csv (plain-language)
 # v0.2 JSON is committed; builder script was removed — restore from git if missing
@@ -1195,6 +1229,8 @@ python notebooks/week7_model_training.py
 │   ├── llm_eval_set_v0.2.csv           # Same, CSV format
 │   ├── llm_eval_set_v0.3.json          # 110-example JTBD plain-language eval (Jun 2026)
 │   ├── llm_eval_set_v0.3.csv           # Same, CSV format
+│   ├── llm_eval_set_holdout.json       # 197-ex holdout eval (150 modal + 47 guardrails)
+│   ├── llm_eval_set_holdout.csv        # Same, CSV format
 │   └── interview_notes.md              # 15 simulated associate vignettes
 │
 ├── prompts/
@@ -1222,6 +1258,7 @@ python notebooks/week7_model_training.py
 ├── scripts/
 │   ├── build_eval_set_v0_1.py          # Builds llm_eval_set_v0.1.json/.csv
 │   ├── build_eval_set_v0_3.py          # Builds llm_eval_set_v0.3.json/.csv (JTBD, 110 examples)
+│   ├── build_eval_set_holdout.py       # Builds llm_eval_set_holdout.json/.csv (197 examples)
 │   ├── compare_llm_versions.py         # LLM prompt A/B diff (legacy)
 │   └── compare_reports.py              # ⭐ General report diff with CIs + significance
 │
@@ -1229,6 +1266,7 @@ python notebooks/week7_model_training.py
 │   ├── v2_ranking_model.pkl            # v2 multiclass baseline
 │   ├── v2_1_pairwise_model.pkl         # v2.1 pairwise (no temporal split)
 │   ├── v2_2_pairwise_temporal.pkl      # v2.2 — current app/API model
+│   ├── v2_3_pairwise_symmetric.pkl     # v2.3 symmetric pairwise (experimental)
 │   └── v3_lambdarank.pkl               # v3 LightGBM LambdaRank (generated by pipeline)
 │
 ├── output/
@@ -1239,6 +1277,9 @@ python notebooks/week7_model_training.py
 │   ├── llm_eval_v0.2_report.json       # LLM v0.2: 64.0% top-1
 │   ├── llm_eval_v0.3_v0_3_report.json          # JTBD v0.3 native (prose) — Jun 26 2026
 │   ├── llm_eval_v0.3_v0_3_features_report.json  # JTBD v0.3 fair input (--input-mode=features)
+│   ├── llm_eval_v0.3_holdout_report.json       # Holdout head-to-head — Jun 27 2026
+│   ├── llm_eval_v0.3_holdout_predictions.json  # Per-example holdout predictions
+│   ├── v2_3_symmetric_report.json              # v2.3 training report
 │   ├── llm_eval_v0.1_predictions.json  # Per-example predictions
 │   ├── llm_eval_v0.2_predictions.json
 │   ├── llm_eval_v0.3_v0_3_predictions.json
@@ -1270,7 +1311,8 @@ python notebooks/week7_model_training.py
 | 7 | Model Training | v2 → v2.2 pairwise GBM | ✅ Sprint 1: 74.3% (5-item) → **68.9%** (28-item retrain) |
 | 8–9 | Demo + LLM Eval | Streamlit app, 50-ex eval, v0.1→v0.2 | ✅ Sprint 1 complete (⭐ SPRINT1_SUMMARY.md) |
 | Post-S1 | Item Expansion | 28-item set, retrained v2.2 | ✅ 175K events, 2,164 scenarios, v2.2 68.9% test, +60pp vs associate |
-| Post-S1 | v3 LambdaRank | LightGBM listwise NDCG; group=scenario | ✅ `src/lambdarank_trainer.py` + pipeline section; artifacts in `models/v3_lambdarank.pkl` |
+| Post-S1 | v2.3 + v3 | Symmetric pairwise + LambdaRank | ✅ v2.3 66.0% / v3 66.2% on 730 holdout; v2.2 remains selection winner |
+| Post-S1 | Holdout head-to-head eval | 197-ex set, LLM vs ML on modal slice | ✅ LLM 26.7% vs v2.2 67.3% formula top-1; hypothesis confirmed |
 
 ---
 
@@ -1296,11 +1338,13 @@ python notebooks/week7_model_training.py
 
 ---
 
-**Last Updated:** June 26, 2026  
-**Project Status:** Sprint 1 complete (Weeks 1–9) + 28-item expansion + JTBD v0.3 eval + Fair-and-Robust eval harness (Jun 2026).
+**Last Updated:** June 27, 2026  
+**Project Status:** Sprint 1 complete (Weeks 1–9) + 28-item expansion + JTBD v0.3 diagnostic eval + **holdout head-to-head eval** (Jun 27 2026).
 
-**Selection decision (Tier 1 holdout, authoritative):** `v2_2_ml` 68.9% vs v1 58.6% (+10.3pp, 730-scenario temporal holdout). Bootstrap CI not yet run on holdout — see [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md) §9 (P1 backlog).
+**Selection decision (Tier 1 holdout, authoritative):** `v2_2_ml` **68.9%** vs v1 58.6% (+10.3pp, 730-scenario temporal holdout). Head-to-head holdout eval confirms LLM v0.3 **26.7%** on 150-ex modal slice (−40.6pp vs v2.2) — idealized human judgment underperforms ML.
 
-**JTBD v0.3 diagnostic eval (110 examples, Jun 26 2026):** LLM **95.8%** JTBD / **78.9%** formula (native) → **90.4%** formula (fair input) ≈ v1 **92.6%** • v2.2 **91.6%**. LLM wins guardrails (2 MPV, 93% refusal); selection stays **v2.2 68.9%** holdout. See [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md).
+**JTBD v0.3 diagnostic eval (110 examples, Jun 26 2026):** LLM **95.8%** JTBD / **78.9%** formula (native) → **90.4%** formula (fair input) ≈ v1 **92.6%** • v2.2 **91.6%**. Useful for guardrails/refusal; not for selection (small-item prose confound). See [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md).
+
+**Holdout eval report:** `output/llm_eval_v0.3_holdout_report.json` — run with `python notebooks/week9_llm_eval_runner.py --eval-set=holdout --prompt-version=v0.3`.
 
 See [`SPRINT1_SUMMARY.md`](SPRINT1_SUMMARY.md) for full results history. See [`EVAL_METHODOLOGY.md`](EVAL_METHODOLOGY.md) for decision framework, guardrails, and statistical protocol.
